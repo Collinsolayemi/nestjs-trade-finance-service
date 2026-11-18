@@ -1,0 +1,140 @@
+import {
+  IANATimeZoneDatabaseEnum,
+  LoanBulletTypeEnum,
+  LoanCustomTenorDurationEnum,
+  LoanDisbursementAccountSourceEnum,
+  LoanDisburseMethodEnum,
+  LoanGracePeriodEnum,
+  LoanInterestAccrualOptionEnum,
+  LoanInterestRateTypeEnum,
+  LoanInterestValueEffectiveDateEnum,
+  LoanMoratoriumDurationEnum,
+  LoanMoratoriumPeriodEnum,
+  LoanRepaymentChannelEnum,
+  LoanRepaymentFrequencyEnum,
+  LoanRepaymentPatternEnum,
+  LoanRepaymentSourceEnum,
+  LoanRequestTypeEnum,
+  LoanStatusEnum,
+  LoanTenorPeriodEnum,
+  TransactionSubSourceEnum,
+} from '../enums';
+import { CreateLoanBookingRequestBody } from '../interfaces';
+import * as moment from 'moment-timezone';
+import { v4 as uuidv4 } from 'uuid';
+
+export default function createLoanBookingRequestBody(
+  data: CreateLoanBookingRequestBody,
+) {
+  const {
+    accountForPrincipal,
+    currencyCode,
+    dealDate,
+    valueDate,
+    initiatorBranchCode,
+    interestRate,
+    productId,
+    principalAmount,
+    purpose,
+    tenantId,
+    tenor,
+    accountName,
+    accountNo,
+    customerId,
+  } = data;
+
+  const loanBookingRequestBody = {
+    loan: {
+      repaymentStartDate: moment(dealDate)
+        .tz(IANATimeZoneDatabaseEnum.LAGOS)
+        .add(1, 'days')
+        .format('YYYY-MM-DD'),
+      approverBranch: null,
+      approver: null,
+      superUser: false,
+      staff: false,
+      customerName: accountName,
+      customerId: customerId !== 'internal' ? customerId : uuidv4(),
+      acctNo: accountNo,
+      bvn: '',
+      loanPurpose: purpose,
+      turnOverEarnPeriod: null,
+      earningType: null,
+      earningDuration: 0,
+      earnValue: null,
+      principal: principalAmount,
+      interestRate: interestRate,
+      tenorValue: tenor,
+      tenorPeriod: LoanTenorPeriodEnum.DAYS,
+      isMoratoriumReq: false,
+      moratoriumValue: 0,
+      moratoriumPeriod: LoanMoratoriumPeriodEnum.DAYS,
+      moratoriumDuration: LoanMoratoriumDurationEnum.INCLUDED_IN_LOAN,
+      isGraceReq: false,
+      graceValue: 0,
+      gracePeriod: LoanGracePeriodEnum.DAYS,
+      disburseMethod: LoanDisburseMethodEnum.ON_APPROVAL,
+      disburseAcct: accountForPrincipal,
+      disburseDate: valueDate
+        ? moment(valueDate).format('YYYY-MM-DD')
+        : moment(dealDate).format('YYYY-MM-DD'),
+      totalAmountDisbursed: null,
+      otherAcctNo: '',
+      isDisburseNotReq: null,
+      notificationChannel: '',
+      repaymentChannel: LoanRepaymentChannelEnum.DIRECT_DEBIT,
+      repaymentSource: LoanRepaymentSourceEnum.CUSTOMER_PRIMARY_ACCOUNT,
+      repaymentAcct: accountForPrincipal,
+      status: LoanStatusEnum.DISBURSED,
+      tenantId: tenantId,
+      equityContribution: 0,
+      repaymentFrequency: LoanRepaymentFrequencyEnum.DAILY,
+      repaymentPattern: LoanRepaymentPatternEnum.BULLET,
+      disbursementAccountLedgerId: '',
+      customerCategory: '',
+      oldData: null,
+      supportingDocument: '',
+      currency: currencyCode,
+      channel: '',
+      emails: null,
+      disbursementAccountSource:
+        LoanDisbursementAccountSourceEnum.CUSTOMER_REPAYMENT_ACCOUNT,
+      interestAccrualOption: LoanInterestAccrualOptionEnum.ON_REQUEST_APPROVAL,
+      productId: productId,
+      productType: productId,
+      initiatorBranch: initiatorBranchCode,
+      reviewerBranch: null,
+      reviewer: null,
+      relationshipOfficer: '',
+      relationshipOfficerName: '',
+      reviewerComment: null,
+      customStartDate: null,
+      customTenor: null,
+      customTenorDuration: LoanCustomTenorDurationEnum.DAYS,
+      interestValueEffectiveDate:
+        LoanInterestValueEffectiveDateEnum.ON_APPROVAL,
+      interestValueScheduledDate: null,
+      accountUUID: null,
+      customerBranch: initiatorBranchCode,
+      tranchedDisbursementEnabled: false,
+      disbursementTranches: null,
+      valueDate: null,
+      isInsiderLoan: false,
+      cashInvestmentBookingId: null,
+      bulletType: LoanBulletTypeEnum.NO_REPAYMENT,
+      loanRequestType: LoanRequestTypeEnum.BOOKING,
+      interestRateType: LoanInterestRateTypeEnum.FIXED,
+      baseInterestRate: 0,
+      interestRateSpread: 0,
+      notificationEnabled: true,
+      transactionSubSource:
+        currencyCode !== 'NGN'
+          ? TransactionSubSourceEnum.FX_PLACEMENTS
+          : TransactionSubSourceEnum.NAIRA_PLACEMENTS,
+      isPlacement: true,
+    },
+    collaterals: [],
+  };
+
+  return loanBookingRequestBody;
+}

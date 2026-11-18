@@ -1,0 +1,59 @@
+name: Test, Build, Deploy
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+    branches:
+      - dev
+      - develop
+      - release
+      - main
+
+  push:
+    branches:
+      - dev
+      - develop
+      - release
+      - main
+
+      
+  workflow_dispatch:
+    inputs:
+      DEPLOY_TARGET:
+        description: 'Deploy to target environment'
+        required: true
+        type: choice
+        options:
+          - qa
+
+jobs:
+  code_quality:
+    uses: sterling-retailcore-team/workflow-templates/.github/workflows/code_quality.yml@seabaas-core
+    secrets: inherit
+    with:
+      CODE_COVERAGE: '' # specify codebase for code coverage. e.g CODE_COVERAGE: 'node' CODE_COVERAGE: 'dotnet' or CODE_COVERAGE: 'python', e.t.c
+      # UNIT_TEST_SCRIPTS: |
+
+  build:
+    uses: sterling-retailcore-team/workflow-templates/.github/workflows/build.yml@seabaas-core
+    with:
+      GITHUB_SHA: ${GITHUB_SHA::8}
+      USE_BUILD_ARGS: false # toggle to use buildtime variables
+      BUILD_ARGS: '' # specify build arguments if needed
+      HAS_CORE_SERVICE: true # toggle to use buildtime variables for variants
+      HAS_MONOREPO: false # toggle to use buildtime variables for monorepo
+      MFE: false # specify if it's a monorepo
+      MODULES: '[""]'
+    secrets: inherit
+
+  deploy:
+    uses: sterling-retailcore-team/workflow-templates/.github/workflows/deploy.yml@seabaas-core
+    with:
+      GITHUB_SHA: ${GITHUB_SHA::8}
+      HAS_CORE_SERVICE: true # toggle to use buildtime variables for variants
+      HAS_MONOREPO: false # toggle to use buildtime variables for monorepo
+      MODULES: '[""]'
+    secrets: inherit
+    needs: build
+    if: always() && (contains(fromJSON('["success", "skipped"]'), needs.build.result))

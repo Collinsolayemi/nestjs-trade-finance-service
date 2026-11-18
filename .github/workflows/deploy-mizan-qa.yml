@@ -1,0 +1,243 @@
+name: Deploy Mizan QA
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      service_name:
+        description: Service key in GitOps values.yaml (services.<name>)
+        required: true
+        default: trade-api
+        type: string
+      image_tag:
+        description: Optional full image tag (leave empty to auto-generate qa-<sha8>)
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  GITOPS_VALUES_FILE: qa/backend/backend-stack/values.yaml
+  GITOPS_BRANCH: qualityassurance
+  MIZAN_TOKEN: ${{ secrets.MIZAN_TOKEN }}
+  MIZAN_USER: ${{ github.actor }}
+
+jobs:
+  build-and-push:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.compute-tag.outputs.image_tag }}
+      image_repo: ${{ steps.image-repo.outputs.image_repo }}
+    steps:
+      - name: Checkout application repository
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GH_ACTIONS_PAT }}
+
+      - name: Determine image repository
+        id: image-repo
+        run: |
+          set -euo pipefail
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          echo "image_repo=ghcr.io/seabaas-co/${repo_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Determine image tag
+        id: compute-tag
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.image_tag }}" ]]; then
+            image_tag="${{ inputs.image_tag }}"
+          else
+            sha_short="$(echo "${GITHUB_SHA}" | cut -c1-8)"
+            image_tag="qa-${sha_short}"
+          fi
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        env:
+          IMAGE_REPO: ${{ steps.image-repo.outputs.image_repo }}
+          IMAGE_TAG: ${{ steps.compute-tag.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          image_uri="${IMAGE_REPO}:${IMAGE_TAG}"
+          docker build -f Dockerfile -t "${image_uri}" .
+          docker push "${image_uri}"
+
+  approver-stage:
+    name: Approver stage
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment:
+      name: qa-deploy
+    steps:
+      - name: Verify actor is in allowed GitHub team
+        env:
+          TEAM_TOKEN: ${{ secrets.GH_ACTIONS_PAT }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          ORG="sterling-retailcore-team"
+          TEAM_SLUG="admin-approvers"
+
+          if [[ -z "${TEAM_TOKEN}" ]]; then
+            echo "Missing required secret: GH_ACTIONS_PAT"
+            exit 1
+          fi
+
+          status_code=$(curl -sS -o /tmp/team-check.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${TEAM_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/${ORG}/teams/${TEAM_SLUG}/memberships/${ACTOR}")
+
+          if [[ "${status_code}" != "200" ]]; then
+            echo "User ${ACTOR} is not authorized to deploy (or token lacks read:org)."
+            cat /tmp/team-check.json
+            exit 1
+          fi
+
+          state=$(python3 -c 'import json; print(json.load(open("/tmp/team-check.json")).get("state", ""))')
+          if [[ "${state}" != "active" ]]; then
+            echo "User ${ACTOR} team membership is not active."
+            exit 1
+          fi
+
+  update-gitops:
+    name: Update Azure GitOps tag
+    runs-on: ubuntu-latest
+    needs:
+      - build-and-push
+      - approver-stage
+    steps:
+      - name: Clone Azure DevOps GitOps repository
+        env:
+          ADO_USER: oreoluwa.onanuga
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          set -euo pipefail
+          ADO_ORG="SterlingAppsDevOps"
+          ADO_PROJECT="seabaas-mizan"
+          ADO_REPO="seabaas-mizan"
+          git clone -b "${GITOPS_BRANCH}" "https://${ADO_USER}:${ADO_PAT}@dev.azure.com/${ADO_ORG}/${ADO_PROJECT}/_git/${ADO_REPO}" gitops
+
+      - name: Update one service image tag in values.yaml
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+          NEW_REPOSITORY: ${{ needs.build-and-push.outputs.image_repo }}
+          NEW_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          cd gitops
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          values_file = os.environ["GITOPS_VALUES_FILE"]
+          service_name = os.environ["SERVICE_NAME"].strip()
+          new_repository = os.environ["NEW_REPOSITORY"].strip()
+          new_tag = os.environ["NEW_TAG"].strip()
+
+          with open(values_file, "r", encoding="utf-8") as file_handle:
+              lines = file_handle.readlines()
+
+          service_pattern = re.compile(rf"^  {re.escape(service_name)}:\s*$")
+          sibling_service_pattern = re.compile(r"^  [A-Za-z0-9._-]+:\s*$")
+          repository_pattern = re.compile(r"^(\s*repository:\s*)([^\s#]+)(\s*(#.*)?)(\r?\n?)$")
+          tag_pattern = re.compile(r"^(\s*tag:\s*)([^\s#]+)(\s*(#.*)?)(\r?\n?)$")
+
+          def indent(line: str) -> int:
+              return len(line) - len(line.lstrip(" "))
+
+          in_services = False
+          service_index = None
+          for idx, line in enumerate(lines):
+              if not in_services and line.strip() == "services:":
+                  in_services = True
+                  continue
+              if in_services and service_pattern.match(line):
+                  service_index = idx
+                  break
+              if in_services and indent(line) == 0 and line.strip() and not line.startswith("#"):
+                  break
+
+          if service_index is None:
+              print(f"ERROR: Service '{service_name}' not found under services")
+              sys.exit(2)
+
+          image_index = None
+          service_end = len(lines)
+          for idx in range(service_index + 1, len(lines)):
+              if sibling_service_pattern.match(lines[idx]):
+                  service_end = idx
+                  break
+              if indent(lines[idx]) == 4 and lines[idx].strip() == "image:":
+                  image_index = idx
+
+          if image_index is None:
+              print(f"ERROR: image block not found for '{service_name}'")
+              sys.exit(3)
+
+          repository_updated = False
+          tag_updated = False
+
+          for idx in range(image_index + 1, service_end):
+              if indent(lines[idx]) <= 4 and lines[idx].strip():
+                  break
+              repository_match = repository_pattern.match(lines[idx])
+              if repository_match and indent(lines[idx]) == 6:
+                  old_repository = repository_match.group(2)
+                  lines[idx] = f"{repository_match.group(1)}{new_repository}{repository_match.group(3)}{repository_match.group(5)}"
+                  repository_updated = True
+                  continue
+              match = tag_pattern.match(lines[idx])
+              if match and indent(lines[idx]) == 6:
+                  old_tag = match.group(2)
+                  lines[idx] = f"{match.group(1)}{new_tag}{match.group(3)}{match.group(5)}"
+                  tag_updated = True
+                  continue
+
+          if not repository_updated:
+              print(f"ERROR: repository field not found in image block for '{service_name}'")
+              sys.exit(4)
+
+          if not tag_updated:
+              print(f"ERROR: tag field not found in image block for '{service_name}'")
+              sys.exit(5)
+
+          with open(values_file, "w", encoding="utf-8") as file_handle:
+              file_handle.writelines(lines)
+
+          print(f"UPDATED: {service_name} repository {old_repository} -> {new_repository}")
+          print(f"UPDATED: {service_name} tag {old_tag} -> {new_tag}")
+          PY
+
+      - name: Commit and push back to Azure DevOps
+        env:
+          SERVICE_NAME: ${{ inputs.service_name }}
+          NEW_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          cd gitops
+
+          if git diff --quiet -- "${GITOPS_VALUES_FILE}"; then
+            echo "No GitOps change detected."
+            exit 0
+          fi
+
+          git config user.name "github-actions-bot"
+          git config user.email "github-actions-bot@users.noreply.github.com"
+          git add "${GITOPS_VALUES_FILE}"
+          git commit -m "chore(gitops): update ${SERVICE_NAME} to ${NEW_TAG}"
+          git push origin "HEAD:${GITOPS_BRANCH}"
